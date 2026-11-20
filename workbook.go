@@ -3,6 +3,7 @@ package xls
 import (
 	"bytes"
 	"encoding/binary"
+	"golang.org/x/text/encoding/charmap"
 	"io"
 	"os"
 	"unicode/utf16"
@@ -96,9 +97,11 @@ func (wb *WorkBook) parseBof(buf io.ReadSeeker, b *bof, pre *bof, offset_pre int
 			}
 			for err == nil && offset_pre < len(wb.sst) {
 				var str string
-				if size > 0 {
-					str, err = wb.get_string(buf_item, size)
-					wb.sst[offset_pre] = wb.sst[offset_pre] + str
+				str, err = wb.get_string(buf_item, size)
+				wb.sst[offset_pre] = wb.sst[offset_pre] + str
+
+				if err == io.EOF {
+					break
 				}
 
 				offset_pre++
@@ -114,19 +117,23 @@ func (wb *WorkBook) parseBof(buf io.ReadSeeker, b *bof, pre *bof, offset_pre int
 		wb.sst = make([]string, info.Count)
 		var size uint16
 		var i = 0
+		// dont forget to initialize offset
+		offset = 0
 		for ; i < int(info.Count); i++ {
-			if err := binary.Read(buf_item, binary.LittleEndian, &size); err == nil {
+			var err error
+			err = binary.Read(buf_item, binary.LittleEndian, &size)
+			if err == nil {
 				var str string
 				str, err = wb.get_string(buf_item, size)
 				wb.sst[i] = wb.sst[i] + str
+			}
 
-				if err == io.EOF {
-					break
-				}
+			if err == io.EOF {
+				break
 			}
 		}
 		offset = i
-	case 0x85: // bOUNDSHEET
+	case 0x85: // boundsheet
 		var bs = new(boundsheet)
 		binary.Read(buf_item, binary.LittleEndian, bs)
 		// different for BIFF5 and BIFF8
@@ -155,12 +162,17 @@ func (wb *WorkBook) parseBof(buf io.ReadSeeker, b *bof, pre *bof, offset_pre int
 	}
 	return
 }
-
+func decodeWindows1251(enc []byte) string {
+	dec := charmap.Windows1251.NewDecoder()
+	out, _ := dec.Bytes(enc)
+	return string(out)
+}
 func (w *WorkBook) get_string(buf io.ReadSeeker, size uint16) (res string, err error) {
 	if w.Is5ver {
 		var bts = make([]byte, size)
 		_, err = buf.Read(bts)
-		res = string(bts)
+		res = decodeWindows1251(bts)
+		//res = string(bts)
 	} else {
 		var richtext_num = uint16(0)
 		var phonetic_size = uint32(0)
@@ -184,11 +196,19 @@ func (w *WorkBook) get_string(buf io.ReadSeeker, size uint16) (res string, err e
 			for ; i < size && err == nil; i++ {
 				err = binary.Read(buf, binary.LittleEndian, &bts[i])
 			}
-			runes := utf16.Decode(bts[:i])
+
+			// when eof found, we dont want to append last element
+			var runes []rune
+			if err == io.EOF {
+				i = i - 1
+			}
+			runes = utf16.Decode(bts[:i])
+
 			res = string(runes)
 			if i < size {
-				w.continue_utf16 = size - i + 1
+				w.continue_utf16 = size - i
 			}
+
 		} else {
 			var bts = make([]byte, size)
 			var n int
@@ -198,7 +218,7 @@ func (w *WorkBook) get_string(buf io.ReadSeeker, size uint16) (res string, err e
 				err = io.EOF
 			}
 
-			var bts1 = make([]uint16, size)
+			var bts1 = make([]uint16, n)
 			for k, v := range bts[:n] {
 				bts1[k] = uint16(v)
 			}
@@ -235,7 +255,7 @@ func (w *WorkBook) get_string(buf io.ReadSeeker, size uint16) (res string, err e
 
 func (w *WorkBook) addSheet(sheet *boundsheet, buf io.ReadSeeker) {
 	name, _ := w.get_string(buf, uint16(sheet.Name))
-	w.sheets = append(w.sheets, &WorkSheet{bs: sheet, Name: name, wb: w})
+	w.sheets = append(w.sheets, &WorkSheet{bs: sheet, Name: name, wb: w, Visibility: TWorkSheetVisibility(sheet.Visible)})
 }
 
 //reading a sheet from the compress file to memory, you should call this before you try to get anything from sheet
